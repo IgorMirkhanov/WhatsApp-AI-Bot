@@ -1,131 +1,74 @@
-# MediaPeace — WhatsApp AI Lead Qualification Bot
+# T3 MediaPeace — WhatsApp AI Lead Qualification Bot
 
-Интеллектуальный чат-бот для WhatsApp Cloud API, который квалифицирует лиды в диалоге: собирает имя, компанию, сферу, услугу и город, сохраняет историю в CRM и автоматически отправляет цепочку напоминаний, если клиент перестал отвечать.
+Интеллектуальный WhatsApp-бот для автоматической квалификации лидов с использованием **стейт-машины** и **AI-анализа намерений** (DeepSeek). Собирает контактные и бизнес-данные в диалоге, сохраняет CRM-карточку в Supabase и удерживает клиента цепочкой напоминаний через BullMQ.
 
 ---
 
 ## Описание проекта
 
-**MediaPeace WhatsApp Bot** — backend-сервис на Node.js и TypeScript, который:
+**T3 MediaPeace** — backend на **Node.js** и **TypeScript**, который:
 
-- принимает входящие сообщения через webhook Meta (WhatsApp Cloud API);
-- ведёт пользователя по настраиваемой воронке шагов (state machine);
-- использует **DeepSeek API** (OpenAI-совместимый SDK) для распознавания услуги и извлечения кастомных запросов;
-- сохраняет лиды и переписку в **Supabase (PostgreSQL)**;
-- планирует отложенные напоминания через **BullMQ** и **Upstash Redis**.
-
-Бот рассчитан на production: быстрый ACK webhook, асинхронная обработка, строгая типизация, изоляция секретов в `.env`.
+- принимает входящие сообщения от **Meta WhatsApp Cloud API**;
+- мгновенно подтверждает webhook (ACK-only), обрабатывает логику асинхронно;
+- ведёт пользователя по шагам воронки (`welcome` → имя → компания → сфера → услуга → город → qualified);
+- на этапе услуги вызывает **DeepSeek** (`deepseek-v4-flash`) для маппинга ответа в JSON;
+- сохраняет лиды и переписку в **Supabase**;
+- планирует touchpoint-напоминания в **Upstash Redis** через **BullMQ**.
 
 ---
 
 ## Архитектура системы
 
 ```mermaid
-flowchart TB
-  subgraph meta [Meta]
-    WA[WhatsApp Cloud API]
-  end
-  subgraph tunnel [Туннель]
-    NG[Ngrok HTTPS]
-  end
-  subgraph app [Приложение Node.js]
-    EX[Express Webhook Server]
-    SM[State Machine + Session Handler]
-    AI[DeepSeek API]
-    Q[BullMQ Queue]
-    W[Touchpoint Worker]
-  end
-  subgraph data [Данные]
-    SB[(Supabase PostgreSQL)]
-    UR[(Upstash Redis)]
-  end
-
-  WA -->|POST /webhook| NG
-  NG --> EX
+flowchart LR
+  WA[Meta WhatsApp Cloud API] -->|POST webhook| NG[Ngrok HTTPS]
+  NG --> EX[Express Server Node.js/TS]
   EX -->|200 EVENT_RECEIVED| WA
-  EX -.->|async| SM
-  SM --> AI
-  SM --> SB
-  SM --> Q
-  Q --> UR
-  W --> UR
-  W -->|напоминания| WA
+  EX -.->|async| SM[State Machine + Session]
+  SM --> DS[DeepSeek API OpenAI SDK]
+  SM --> SB[(Supabase PostgreSQL)]
+  SM --> Q[BullMQ Queue]
+  Q --> UR[(Upstash Redis)]
+  W[BullMQ Worker] --> UR
+  W --> WA
   W --> SB
 ```
 
-### Поток сообщения
+### Компоненты потока
 
-1. **Meta WhatsApp Cloud API** отправляет POST на публичный URL (`/webhook`).
-2. **Ngrok** пробрасывает HTTPS-трафик на локальный `localhost:3000` (или на сервер в production).
-3. **Express** сразу отвечает `200` + `EVENT_RECEIVED` (ACK-only boundary), чтобы Meta не ретраила webhook.
-4. **Session Handler** асинхронно обрабатывает текст: Supabase, state machine, DeepSeek, постановка задач в очередь.
-5. **BullMQ Worker** (отдельный процесс) по расписанию отправляет touchpoint-сообщения через WhatsApp API.
+| Компонент | Назначение |
+|-----------|------------|
+| **Meta WhatsApp Cloud API** | Принимает сообщения пользователя и триггерит HTTP webhook на ваш сервер. |
+| **Ngrok** | Безопасный HTTPS-туннель для локальной разработки (`localhost:3000` → публичный URL). |
+| **Express Server (Node.js/TS)** | **ACK-only boundary**: сразу отвечает Meta `200` + `EVENT_RECEIVED`, чтобы Meta не дублировала запросы при долгой обработке. |
+| **DeepSeek API (OpenAI SDK)** | Модель `deepseek-v4-flash` асинхронно анализирует текст на этапе услуги и возвращает строгий JSON (`json_object`). |
+| **Supabase (PostgreSQL)** | Долговременная память: карточки `leads`, шаги воронки, статусы, `messages`, таймстампы. |
+| **Upstash Redis & BullMQ** | In-memory «секундомер»: отложенные job'ы напоминаний (touchpoints) без нагрузки на СУБД. |
 
-### Зачем две «базы данных»?
+### Зачем нужны две базы данных?
 
-| Хранилище | Роль | Аналогия |
-|-----------|------|----------|
-| **Supabase (PostgreSQL)** | CRM и долгосрочная память: лиды, статусы, шаги воронки, полная история `messages` | «Журнал и карточка клиента» |
-| **Upstash Redis** | Быстрый in-memory брокер для BullMQ: отложенные job'ы, отмена при смене шага, TTL напоминаний | «Секундомер и будильник» |
+- **Supabase (диск, CRM)** — надёжное хранилище бизнес-данных: кто клиент, на каком шаге, что ответил, когда последний раз писал. Подходит для отчётов, интеграций и долгой истории.
+- **Upstash Redis (оперативная память)** — сверхбыстрые очереди и таймеры BullMQ: «напомнить через 2 мин», отменить job при новом ответе, не создавать тысячи cron-задач в PostgreSQL.
 
-Supabase не подходит как планировщик с точностью до минуты для тысяч отложенных задач с отменой. Redis + BullMQ дают нативные delayed jobs и идемпотентные `jobId` per `wa_id`. Supabase остаётся источником истины для бизнес-данных.
-
-### AI-слой (DeepSeek)
-
-Клиент OpenAI SDK настроен на `https://api.deepseek.com/v1`. Модель задаётся в `OPENAI_MODEL` (например `deepseek-v4-flash` или fallback `deepseek-chat`). Ответы запрашиваются в формате `json_object` для маппинга услуг и извлечения «Другое».
+Разделение обязанностей снижает нагрузку на Supabase и даёт предсказуемую работу фоновых таймеров.
 
 ---
 
 ## Логика удержания (Touchpoints)
 
-### ACK-only boundary
+1. При **смене шага** воронки отменяются все pending job'ы для `wa_id`.
+2. Ставится `touchpoint_1` (в production — через 2 часа; при `SHORT_TIMEOUTS=true` — **через 2 минуты**).
+3. Если клиент не ответил — worker отправляет первое напоминание и планирует `touchpoint_2` (+3 мин в тесте / +3 ч в prod).
+4. Если снова тишина — статус лида **`No Response`**, сессия закрыта.
+5. Любой новый ответ клиента обновляет `last_client_message_at` и сбрасывает цепочку.
 
-```text
-Meta POST /webhook  →  Express: res.status(200).send('EVENT_RECEIVED')  →  return
-                              ↓ (фон)
-                    handleClientMessage(waId, text)
-```
-
-Meta ждёт ответ **менее ~20 секунд**. OpenAI/DeepSeek, Supabase и CRM не должны блокировать HTTP-ответ — иначе дублирующие webhook'и и рассинхрон.
-
-### Цепочка BullMQ
-
-При каждом **переходе на новый шаг** воронки:
-
-1. Отменяются все pending job'ы для `wa_id` (`touchpoint_1`, `touchpoint_2`).
-2. Ставится `touchpoint_1` с задержкой **2 часа** (в тесте `SHORT_TIMEOUTS=true` → **2 минуты**).
-3. Если клиент не ответил — бот шлёт первое напоминание и планирует `touchpoint_2` (+3 часа / +3 мин в тесте).
-4. Если снова тишина — статус лида `No Response`, шаг `closed`.
-
-Если клиент пишет снова — `last_client_message_at` обновляется, job'ы пересоздаются; сработавший touchpoint проверяет `scheduledAt` и пропускает отправку.
+Worker запускается отдельно: `npm run worker`.
 
 ---
 
-## Структура репозитория
+## Инструкция по развёртыванию
 
-```text
-src/
-  server.ts              # Express, GET/POST /webhook
-  controllers/           # Верификация Meta, ingestion
-  bot/                   # State machine, session handler
-  services/              # Supabase, DeepSeek, WhatsApp, BullMQ
-  workers/               # Touchpoint worker
-  config/steps.ts        # Шаги воронки (конфиг без правки движка)
-supabase/migrations/     # SQL-схема leads + messages
-scripts/                 # PowerShell/CMD для 3 терминалов
-```
-
----
-
-## Инструкция по локальному развёртыванию
-
-### Требования
-
-- Node.js **20+**
-- Аккаунты: Meta Developer, Supabase, Upstash, DeepSeek, ngrok
-- Три терминала (или Cursor Tasks / `scripts/`)
-
-### 1. Клонирование и зависимости
+### 1. Зависимости
 
 ```bash
 git clone https://github.com/IgorMirkhanov/WhatsApp-AI-Bot.git
@@ -134,70 +77,85 @@ npm install
 cp .env.example .env
 ```
 
-### 2. Заполнение `.env`
+Выполните `supabase/migrations/001_initial_schema.sql` в Supabase SQL Editor.
 
-| Переменная | Где взять |
-|------------|-----------|
+### 2. Переменные `.env`
+
+| Переменная | Описание |
+|------------|----------|
 | `WHATSAPP_ACCESS_TOKEN` | Meta Developer → WhatsApp → API Setup |
-| `WHATSAPP_PHONE_NUMBER_ID` | Тот же раздел, ID номера |
-| `WHATSAPP_VERIFY_TOKEN` | Произвольная строка (та же в Meta webhook) |
-| `SUPABASE_URL` | Supabase → Project Settings → API → URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → API → `service_role` (секрет, только backend) |
-| `OPENAI_API_KEY` | [DeepSeek Platform](https://platform.deepseek.com) → API Keys |
-| `OPENAI_MODEL` | `deepseek-v4-flash` или `deepseek-chat` |
+| `WHATSAPP_PHONE_NUMBER_ID` | ID телефонного номера в Meta |
+| `WHATSAPP_VERIFY_TOKEN` | Строка для верификации GET webhook (та же в Meta Dashboard) |
+| `SUPABASE_URL` | Supabase → Project Settings → API |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key (только backend) |
+| `OPENAI_API_KEY` | Ключ DeepSeek Platform |
+| `OPENAI_MODEL` | `deepseek-v4-flash` (fallback: `deepseek-chat`) |
 | `OPENAI_BASE_URL` | `https://api.deepseek.com/v1` |
-| `REDIS_URL` | Upstash → Database → `rediss://...` (TLS) |
-| `SHORT_TIMEOUTS` | `true` для теста (2/3 мин), `false` для prod (2/3 ч) |
+| `REDIS_URL` | Upstash → `rediss://...` |
+| `SHORT_TIMEOUTS` | `true` — тест 2/3 мин; `false` — prod 2/3 ч |
+| `PORT` | `3000` |
 
-Выполните SQL из `supabase/migrations/001_initial_schema.sql` в Supabase SQL Editor.
+> **Важно:** файл `.env` в `.gitignore` и никогда не публикуется в GitHub.
 
-### 3. Ngrok (локально)
+### 3. Три терминала
 
-```bash
-ngrok config add-authtoken <ваш_токен>
-ngrok http 3000
-```
-
-В Meta укажите: `https://<subdomain>.ngrok-free.app/webhook` и verify token из `.env`.
-
-### 4. Запуск трёх процессов
-
-| # | Команда | Назначение |
-|---|---------|------------|
+| # | Команда | Роль |
+|---|---------|------|
 | 1 | `npm run dev` | Webhook + обработка сообщений |
-| 2 | `npm run worker` | Touchpoint worker (BullMQ) |
-| 3 | `ngrok http 3000` | Публичный HTTPS |
+| 2 | `npm run worker` | Touchpoints (BullMQ) |
+| 3 | `ngrok http 3000` | HTTPS для Meta |
 
-Скрипты Windows: `scripts/start-webhook-server.ps1`, `start-bullmq-worker.ps1`, `start-ngrok-tunnel.ps1`.
+Скрипты: `scripts/start-webhook-server.ps1`, `start-bullmq-worker.ps1`, `start-ngrok-tunnel.ps1`.
+
+### 4. Meta Dashboard
+
+- **Callback URL:** `https://<ngrok-host>/webhook`
+- **Verify token:** значение `WHATSAPP_VERIFY_TOKEN` из `.env`
 
 ### 5. Проверка
 
-- `GET http://localhost:3000/health` → `{"status":"ok"}`
-- В логах worker: `Touchpoint worker started` без ошибок Redis
-- Тестовое сообщение в WhatsApp → запись в Supabase `leads` / `messages`
+```bash
+curl http://localhost:3000/health
+```
+
+Ожидается: `{"status":"ok",...}`
 
 ---
 
-## Скрипты npm
+## Структура проекта
+
+```text
+src/
+  server.ts                 # Express, /webhook
+  controllers/              # Meta verify + POST ingestion
+  bot/                      # State machine, session handler
+  services/                 # Supabase, DeepSeek, WhatsApp, queue
+  workers/                  # Touchpoint worker
+  config/steps.ts           # Шаги воронки (конфиг)
+supabase/migrations/        # SQL schema
+```
+
+---
+
+## npm-скрипты
 
 | Команда | Описание |
 |---------|----------|
-| `npm run dev` | Сервер с hot-reload (tsx) |
+| `npm run dev` | Сервер (tsx watch) |
 | `npm run worker` | BullMQ worker |
-| `npm run build` | Компиляция TypeScript |
-| `npm run typecheck` | Проверка типов без emit |
+| `npm run typecheck` | Строгая проверка TypeScript |
+| `npm run build` | Сборка в `dist/` |
 
 ---
 
 ## Безопасность
 
-- **Никогда** не коммитьте `.env` — файл в `.gitignore`.
-- Используйте `SUPABASE_SERVICE_ROLE_KEY` только на сервере.
-- Ротируйте токены Meta / DeepSeek при утечке.
-- В production замените ngrok на стабильный домен с TLS.
+- Секреты только в `.env` (DeepSeek, Meta, Supabase, Upstash, ngrok).
+- `SUPABASE_SERVICE_ROLE_KEY` — только на сервере.
+- Ротируйте ключи при утечке; не пересылайте `.env` в мессенджерах.
 
 ---
 
-## Лицензия
+## Репозиторий
 
-Проприетарный проект MediaPeace. Использование по согласованию с владельцем репозитория.
+https://github.com/IgorMirkhanov/WhatsApp-AI-Bot
