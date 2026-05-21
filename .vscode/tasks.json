@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "1. Webhook Server",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "mediapeace" }
+    },
+    {
+      "label": "2. BullMQ Worker",
+      "type": "shell",
+      "command": "npm run worker",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "mediapeace" }
+    },
+    {
+      "label": "3. Ngrok Tunnel",
+      "type": "shell",
+      "command": "ngrok http 3000",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "mediapeace" }
+    },
+    {
+      "label": "Run All (after .env is filled)",
+      "dependsOn": ["1. Webhook Server", "2. BullMQ Worker", "3. Ngrok Tunnel"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    }
+  ]
+}
