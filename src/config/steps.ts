@@ -57,13 +57,13 @@ export const STEP_SEQUENCE: StepDefinition[] = [
   {
     id: STEP_IDS.SPHERE,
     field: 'sphere',
-    prompt: `Какая услуга вас интересует?\n\n${serviceList}\n\nНапишите номер или название услуги.`,
+    prompt: 'В какой сфере работает ваша компания? (например, IT, маркетинг, торговля)',
     next: STEP_IDS.SERVICE,
   },
   {
     id: STEP_IDS.SERVICE,
     field: 'service',
-    prompt: 'В каком городе вы находитесь?',
+    prompt: `Какая услуга вас интересует?\n\n${serviceList}\n\nНапишите номер или название услуги.`,
     next: STEP_IDS.CITY,
   },
   {
